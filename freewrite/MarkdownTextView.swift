@@ -16,7 +16,13 @@ class MarkdownNSTextView: NSTextView {
         if markdownCoordinator?.handleSlashKeyEvent(event, in: self) == true {
             return
         }
+        markdownCoordinator?.clearSelectedImageIfNeeded()
         super.keyDown(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        markdownCoordinator?.clearSelectedImageIfNeeded()
+        super.mouseDown(with: event)
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -32,6 +38,11 @@ class MarkdownNSTextView: NSTextView {
             return
         }
         super.paste(sender)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        markdownCoordinator?.clearSelectedImageIfNeeded()
+        return super.resignFirstResponder()
     }
 }
 
@@ -328,12 +339,12 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             updateTypingAttributes()
-            guard let textView else { return }
-            if let selectedImageRange,
-               !NSEqualRanges(selectedImageRange, textView.selectedRange()) {
-                self.selectedImageRange = nil
-                scheduleImageOverlayUpdate()
-            }
+        }
+
+        func clearSelectedImageIfNeeded() {
+            guard selectedImageRange != nil else { return }
+            selectedImageRange = nil
+            scheduleImageOverlayUpdate()
         }
 
         private func updateTypingAttributes() {
@@ -619,7 +630,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         private func selectImage(range: NSRange, in textView: NSTextView) {
             selectedImageRange = range
-            textView.setSelectedRange(range)
+            textView.window?.makeFirstResponder(textView)
             scheduleImageOverlayUpdate()
         }
 
@@ -712,7 +723,6 @@ struct MarkdownTextView: NSViewRepresentable {
 
             let updatedRange = NSRange(location: match.range.location, length: (replacement as NSString).length)
             selectedImageRange = updatedRange
-            textView.setSelectedRange(updatedRange)
             scheduleImageOverlayUpdate()
         }
 
