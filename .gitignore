@@ -43,6 +43,7 @@ fastlane/test_output
 
 # Archives
 *.xcarchive
+freewrite v1/
 
 # Xcode Server
 *.xcscheme
