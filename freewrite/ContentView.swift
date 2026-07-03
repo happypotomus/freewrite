@@ -24,21 +24,26 @@ struct HumanEntry: Identifiable {
     var entryType: EntryType
     var videoFilename: String?
 
+    private static func entryTimestampStrings(for date: Date = Date()) -> (filename: String, display: String) {
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        let filenameDate = dateFormatter.string(from: date)
+
+        dateFormatter.dateFormat = "MMM d"
+        let displayDate = dateFormatter.string(from: date)
+
+        return (filenameDate, displayDate)
+    }
+
     static func createNew() -> HumanEntry {
         let id = UUID()
-        let now = Date()
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
-        let dateString = dateFormatter.string(from: now)
-
-        // For display
-        dateFormatter.dateFormat = "MMM d"
-        let displayDate = dateFormatter.string(from: now)
+        let timestamp = entryTimestampStrings()
 
         return HumanEntry(
             id: id,
-            date: displayDate,
-            filename: "[\(id)]-[\(dateString)].md",
+            date: timestamp.display,
+            filename: "\(timestamp.filename).md",
             previewText: "",
             entryType: .text,
             videoFilename: nil
@@ -47,21 +52,13 @@ struct HumanEntry: Identifiable {
 
     static func createVideoEntry() -> HumanEntry {
         let id = UUID()
-        let now = Date()
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
-        let dateString = dateFormatter.string(from: now)
-
-        // For display
-        dateFormatter.dateFormat = "MMM d"
-        let displayDate = dateFormatter.string(from: now)
-
-        let videoFilename = "[\(id)]-[\(dateString)].mov"
+        let timestamp = entryTimestampStrings()
+        let videoFilename = "\(timestamp.filename).mov"
 
         return HumanEntry(
             id: id,
-            date: displayDate,
-            filename: "[\(id)]-[\(dateString)].md",
+            date: timestamp.display,
+            filename: "\(timestamp.filename).md",
             previewText: "Video Entry",
             entryType: .video,
             videoFilename: videoFilename
@@ -101,7 +98,7 @@ struct ContentView: View {
     @State private var opacity: Double = 1.0
     @State private var shouldShowGray = true // New state to control color
     @State private var lastClickTime: Date? = nil
-    @State private var bottomNavOpacity: Double = 1.0
+    @State private var bottomNavOpacity: Double = 0.0
     @State private var isHoveringBottomNav = false
     @State private var selectedEntryIndex: Int = 0
     @State private var scrollOffset: CGFloat = 0
@@ -130,10 +127,13 @@ struct ContentView: View {
     @State private var isHoveringBackspaceToggle = false // Add state for backspace toggle hover
     @State private var showingVideoRecording = false // Add state for video recording view
     @State private var isHoveringVideoButton = false // Add state for video button hover
+    @State private var isHoveringPhotoButton = false
     @State private var currentVideoURL: URL? = nil // Add state for current video being viewed
     @State private var isPreparingVideoRecording = false
     @State private var preparedCameraManager: CameraManager? = nil
     @State private var videoRecordingPreparationID: UUID? = nil
+    @State private var slashMenuState: SlashMenuState? = nil
+    @State private var pendingMarkdownInsertion: String? = nil
     @State private var showingVideoPermissionPopover = false
     @State private var videoPermissionPopoverItems: [VideoPermissionPopoverItem] = []
     @State private var videoPermissionPopoverFallbackMessage: String? = nil
@@ -192,6 +192,23 @@ struct ContentView: View {
         return directory
     }()
 
+    private let imagesDirectory: URL = {
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Freewrite")
+            .appendingPathComponent("Images")
+
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                print("Successfully created Freewrite/Images directory")
+            } catch {
+                print("Error creating images directory: \(error)")
+            }
+        }
+
+        return directory
+    }()
+
     private let thumbnailMemoryCache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
         cache.countLimit = 512
@@ -241,9 +258,18 @@ struct ContentView: View {
         return videosDirectory
     }
 
+    private func getImagesDirectory() -> URL {
+        return imagesDirectory
+    }
+
     private func getVideoEntryDirectory(for videoFilename: String) -> URL {
         let baseName = (videoFilename as NSString).deletingPathExtension
         return getVideosDirectory().appendingPathComponent(baseName, isDirectory: true)
+    }
+
+    private func getImageEntryDirectory(for entry: HumanEntry) -> URL {
+        let baseName = (entry.filename as NSString).deletingPathExtension
+        return getImagesDirectory().appendingPathComponent(baseName, isDirectory: true)
     }
 
     private func getManagedVideoURL(for filename: String) -> URL {
@@ -417,6 +443,132 @@ struct ContentView: View {
         return cleaned.isEmpty ? nil : cleaned
     }
 
+    private func selectedTextEntry() -> HumanEntry? {
+        guard let selectedEntryId,
+              let entry = entries.first(where: { $0.id == selectedEntryId }),
+              entry.entryType == .text else {
+            return nil
+        }
+        return entry
+    }
+
+    private func ensureImageEntryDirectoryExists(for entry: HumanEntry) throws -> URL {
+        let directory = getImageEntryDirectory(for: entry)
+        if !fileManager.fileExists(atPath: directory.path) {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        return directory
+    }
+
+    private func relativeImagePath(for fileURL: URL, entry: HumanEntry) -> String {
+        let entryDirectoryName = (entry.filename as NSString).deletingPathExtension
+        return "Images/\(entryDirectoryName)/\(fileURL.lastPathComponent)"
+    }
+
+    private func markdownForImagePaths(_ paths: [String]) -> String {
+        guard !paths.isEmpty else { return "" }
+        let imageLines = paths.map { "![Photo](\($0))" }.joined(separator: "\n\n")
+        return "\n\n\(imageLines)\n\n"
+    }
+
+    private func isImageURL(_ url: URL) -> Bool {
+        guard let type = UTType(filenameExtension: url.pathExtension) else {
+            return false
+        }
+        return type.conforms(to: .image)
+    }
+
+    private func importImageFile(_ sourceURL: URL, for entry: HumanEntry) throws -> String {
+        let directory = try ensureImageEntryDirectoryExists(for: entry)
+        let sourceExtension = sourceURL.pathExtension.isEmpty ? "png" : sourceURL.pathExtension
+        let destinationURL = directory.appendingPathComponent("\(UUID().uuidString).\(sourceExtension)")
+
+        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        return relativeImagePath(for: destinationURL, entry: entry)
+    }
+
+    private func importImage(_ image: NSImage, for entry: HumanEntry) throws -> String {
+        let directory = try ensureImageEntryDirectoryExists(for: entry)
+        let destinationURL = directory.appendingPathComponent("\(UUID().uuidString).png")
+
+        guard let tiff = image.tiffRepresentation,
+              let bitmapRep = NSBitmapImageRep(data: tiff),
+              let imageData = bitmapRep.representation(using: .png, properties: [:]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        try imageData.write(to: destinationURL, options: .atomic)
+        return relativeImagePath(for: destinationURL, entry: entry)
+    }
+
+    private func markdownForImages(from pasteboard: NSPasteboard) -> String? {
+        guard let entry = selectedTextEntry() else {
+            return nil
+        }
+
+        var importedPaths: [String] = []
+
+        if let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] {
+            for url in urls where isImageURL(url) {
+                do {
+                    importedPaths.append(try importImageFile(url, for: entry))
+                } catch {
+                    print("Error importing image file \(url.lastPathComponent): \(error)")
+                }
+            }
+        }
+
+        if importedPaths.isEmpty, let image = NSImage(pasteboard: pasteboard) {
+            do {
+                importedPaths.append(try importImage(image, for: entry))
+            } catch {
+                print("Error importing pasted image: \(error)")
+            }
+        }
+
+        guard !importedPaths.isEmpty else {
+            return nil
+        }
+
+        return markdownForImagePaths(importedPaths)
+    }
+
+    private func choosePhotoForSelectedEntry() {
+        guard selectedTextEntry() != nil else {
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+
+        panel.begin { response in
+            guard response == .OK, let entry = selectedTextEntry() else {
+                return
+            }
+
+            let importedPaths = panel.urls.compactMap { url -> String? in
+                do {
+                    return try importImageFile(url, for: entry)
+                } catch {
+                    print("Error importing selected image \(url.lastPathComponent): \(error)")
+                    return nil
+                }
+            }
+
+            guard !importedPaths.isEmpty else {
+                return
+            }
+
+            pendingMarkdownInsertion = markdownForImagePaths(importedPaths)
+        }
+    }
+
     private func previewTextFromTranscript(_ transcript: String?) -> String {
         guard let transcript else {
             return "Video Entry"
@@ -444,6 +596,21 @@ struct ContentView: View {
         return preview + "..."
     }
 
+    private func stripMarkdownForPreview(_ text: String) -> String {
+        var result = text
+        // Strip heading markers
+        result = result.replacingOccurrences(of: "^#{1,3}\\s+", with: "", options: .regularExpression)
+        // Strip bold markers
+        result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "$1", options: .regularExpression)
+        // Strip italic markers
+        result = result.replacingOccurrences(of: "(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)", with: "$1", options: .regularExpression)
+        // Replace inline image markdown with a readable preview token
+        result = result.replacingOccurrences(of: "!\\[[^\\]]*\\]\\([^)]+\\)", with: "Photo", options: .regularExpression)
+        // Strip blockquote markers
+        result = result.replacingOccurrences(of: "^>\\s+", with: "", options: .regularExpression)
+        return result.trimmingCharacters(in: .whitespaces)
+    }
+
     private func videoPreviewText(for videoFilename: String) -> String {
         previewTextFromTranscript(loadTranscriptText(for: videoFilename))
     }
@@ -466,30 +633,72 @@ struct ContentView: View {
         }
     }
     
+    private func stableEntryID(for filename: String) -> UUID {
+        let bytes = Array(filename.utf8)
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash &*= 0x100000001b3
+        }
+
+        var uuidBytes = [UInt8](repeating: 0, count: 16)
+        for index in 0..<16 {
+            let shift = UInt64((index * 7) % 64)
+            let rotated = shift == 0 ? hash : ((hash >> shift) | (hash << (64 - shift)))
+            uuidBytes[index] = UInt8((rotated >> UInt64((index % 8) * 8)) & 0xff)
+        }
+        uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x40
+        uuidBytes[8] = (uuidBytes[8] & 0x3f) | 0x80
+
+        return UUID(uuid: (
+            uuidBytes[0], uuidBytes[1], uuidBytes[2], uuidBytes[3],
+            uuidBytes[4], uuidBytes[5], uuidBytes[6], uuidBytes[7],
+            uuidBytes[8], uuidBytes[9], uuidBytes[10], uuidBytes[11],
+            uuidBytes[12], uuidBytes[13], uuidBytes[14], uuidBytes[15]
+        ))
+    }
+
     private func parseCanonicalEntryFilename(_ filename: String) -> (uuid: UUID, timestamp: Date)? {
-        guard filename.hasPrefix("["),
-              filename.hasSuffix("].md"),
-              let divider = filename.range(of: "]-[") else {
-            return nil
-        }
-
-        let uuidStart = filename.index(after: filename.startIndex)
-        let uuidString = String(filename[uuidStart..<divider.lowerBound])
-        guard let uuid = UUID(uuidString: uuidString) else {
-            return nil
-        }
-
-        let timestampStart = divider.upperBound
-        let timestampEnd = filename.index(filename.endIndex, offsetBy: -4) // before ".md"
-        let timestampString = String(filename[timestampStart..<timestampEnd])
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
-        guard let timestamp = formatter.date(from: timestampString) else {
+
+        if filename.hasPrefix("["),
+           filename.hasSuffix("].md"),
+           let divider = filename.range(of: "]-[") {
+            let uuidStart = filename.index(after: filename.startIndex)
+            let uuidString = String(filename[uuidStart..<divider.lowerBound])
+            guard let uuid = UUID(uuidString: uuidString) else {
+                return nil
+            }
+
+            let timestampStart = divider.upperBound
+            let timestampEnd = filename.index(filename.endIndex, offsetBy: -4) // before ".md"
+            let timestampString = String(filename[timestampStart..<timestampEnd])
+            formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
+            guard let timestamp = formatter.date(from: timestampString) else {
+                return nil
+            }
+
+            return (uuid: uuid, timestamp: timestamp)
+        }
+
+        guard filename.hasSuffix(".md") else {
             return nil
         }
 
-        return (uuid: uuid, timestamp: timestamp)
+        let timestampString = (filename as NSString).deletingPathExtension
+        let supportedDateFilenameFormats = [
+            "yyyy-MM-dd HH-mm-ss",
+            "yyyy-MM-dd-HH-mm-ss"
+        ]
+
+        for dateFormat in supportedDateFilenameFormats {
+            formatter.dateFormat = dateFormat
+            if let timestamp = formatter.date(from: timestampString) {
+                return (uuid: stableEntryID(for: filename), timestamp: timestamp)
+            }
+        }
+        return nil
     }
     
     private func isEntryNewer(_ lhs: HumanEntry, than rhs: HumanEntry) -> Bool {
@@ -576,9 +785,11 @@ struct ContentView: View {
                 // Read file contents for preview
                 do {
                     let content = try String(contentsOf: fileURL, encoding: .utf8)
-                    let preview = content
-                        .replacingOccurrences(of: "\n", with: " ")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let preview = stripMarkdownForPreview(
+                        content
+                            .replacingOccurrences(of: "\n", with: " ")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
                     let truncated = preview.isEmpty ? "" : (preview.count > 30 ? String(preview.prefix(30)) + "..." : preview)
 
                     // Format display date
@@ -861,6 +1072,36 @@ struct ContentView: View {
         return colorScheme == .light ? Color.primary : Color.white
     }
 
+    private func hideBottomNavForTyping() {
+        guard currentVideoURL == nil,
+              !showingChatMenu,
+              !showingVideoPermissionPopover,
+              bottomNavOpacity > 0 else { return }
+
+        withAnimation(.easeIn(duration: 0.12)) {
+            bottomNavOpacity = 0.0
+        }
+    }
+
+    private func revealBottomNavForBottomHover() {
+        guard bottomNavOpacity < 1.0 else { return }
+
+        withAnimation(.easeOut(duration: 0.18)) {
+            bottomNavOpacity = 1.0
+        }
+    }
+
+    private func hideBottomNavAfterBottomHover() {
+        guard currentVideoURL == nil,
+              !showingChatMenu,
+              !showingVideoPermissionPopover,
+              bottomNavOpacity > 0 else { return }
+
+        withAnimation(.easeIn(duration: 0.18)) {
+            bottomNavOpacity = 0.0
+        }
+    }
+
     
     var body: some View {
         let buttonBackground = colorScheme == .light ? Color.white : Color.black
@@ -885,32 +1126,37 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .ignoresSafeArea(edges: .top)
                 } else {
-                    // Show text editor for text entries
-                    TextEditor(text: $text)
-                    .background(Color(colorScheme == .light ? .white : .black))
-                    .font(.custom(selectedFont, size: fontSize))
-                    .foregroundColor(colorScheme == .light ? Color(red: 0.20, green: 0.20, blue: 0.20) : Color(red: 0.9, green: 0.9, blue: 0.9))
-                    .scrollContentBackground(.hidden)
-                    .scrollIndicators(.never)
-                    .lineSpacing(lineHeight)
-                    .frame(maxWidth: 650)
+                    // Show markdown editor for text entries
+                    MarkdownTextView(
+                        text: $text,
+                        pendingInsertion: $pendingMarkdownInsertion,
+                        font: NSFont(name: selectedFont, size: fontSize) ?? .systemFont(ofSize: fontSize),
+                        textColor: colorScheme == .light
+                            ? NSColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1.0)
+                            : NSColor(red: 0.9, green: 0.9, blue: 0.9, alpha: 1.0),
+                        lineSpacing: lineHeight,
+                        colorScheme: colorScheme,
+                        backspaceDisabled: backspaceDisabled,
+                        imageBaseURL: getDocumentsDirectory(),
+                        imageMarkdownProvider: { pasteboard in
+                            markdownForImages(from: pasteboard)
+                        },
+                        onPhotoCommand: {
+                            choosePhotoForSelectedEntry()
+                        },
+                        onUserTextEdited: {
+                            hideBottomNavForTyping()
+                        },
+                        onSlashStateChanged: { state in
+                            slashMenuState = state
+                        }
+                    )
+                    .frame(maxWidth: 650, maxHeight: .infinity)
                     .padding(.top, 40)
                     .id("\(selectedFont)-\(fontSize)-\(colorScheme)")
                     .padding(.bottom, bottomNavOpacity > 0 ? navHeight : 0)
-                    .colorScheme(colorScheme)
                     .onAppear {
                         placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
-                        // Removed findSubview code which was causing errors
-
-                        // Add keyboard monitor for backspace/delete keys
-                        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                            // Check if backspace is disabled and the key is delete/backspace
-                            if backspaceDisabled && (event.keyCode == 51 || event.keyCode == 117) {
-                                // Block the backspace/delete key
-                                return nil
-                            }
-                            return event
-                        }
                     }
                     .overlay(
                         ZStack(alignment: .topLeading) {
@@ -919,10 +1165,23 @@ struct ContentView: View {
                                     .font(.custom(selectedFont, size: fontSize))
                                     .foregroundColor(colorScheme == .light ? .gray.opacity(0.5) : .gray.opacity(0.6))
                                     .allowsHitTesting(false)
-                                    .offset(x: 5, y: 40)
+                                    .offset(x: 12, y: 46)
                             }
                         }, alignment: .topLeading
                     )
+                    .overlay(alignment: .topLeading) {
+                        if let slashState = slashMenuState {
+                            SlashCommandMenu(
+                                filterText: slashState.filterText,
+                                selectedIndex: slashState.selectedIndex,
+                                colorScheme: colorScheme,
+                                onSelect: { blockType in
+                                    slashState.insertBlock(blockType)
+                                }
+                            )
+                            .offset(x: 20, y: 60)
+                        }
+                    }
                 }
                     
                 
@@ -1216,6 +1475,30 @@ struct ContentView: View {
                             Text("•")
                                 .foregroundColor(.gray)
 
+                            if !isViewingVideoEntry {
+                                Button(action: {
+                                    choosePhotoForSelectedEntry()
+                                }) {
+                                    Image(systemName: "photo")
+                                        .foregroundColor(isHoveringPhotoButton ? textHoverColor : textColor)
+                                        .frame(width: 14, height: 14)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Add photo")
+                                .onHover { hovering in
+                                    isHoveringPhotoButton = hovering
+                                    isHoveringBottomNav = hovering
+                                    if hovering {
+                                        NSCursor.pointingHand.push()
+                                    } else {
+                                        NSCursor.pop()
+                                    }
+                                }
+
+                                Text("•")
+                                    .foregroundColor(.gray)
+                            }
+
                             Button("Chat") {
                                 showingChatMenu = true
                                 // Ensure didCopyPrompt is reset when opening the menu
@@ -1489,19 +1772,31 @@ struct ContentView: View {
                     .padding()
                     .background(Color(colorScheme == .light ? .white : .black))
                     .opacity(bottomNavOpacity)
+                    .allowsHitTesting(bottomNavOpacity > 0.05)
                     .onHover { hovering in
                         isHoveringBottomNav = hovering
                         if hovering {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                bottomNavOpacity = 1.0
-                            }
-                        } else if timerIsRunning {
-                            withAnimation(.easeIn(duration: 1.0)) {
-                                bottomNavOpacity = 0.0
-                            }
+                            revealBottomNavForBottomHover()
+                        } else {
+                            hideBottomNavAfterBottomHover()
                         }
                     }
                 }
+
+                VStack {
+                    Spacer()
+                    BottomHoverRevealTrackingView(
+                        onMouseEntered: {
+                            revealBottomNavForBottomHover()
+                        },
+                        onMouseExited: {
+                            hideBottomNavAfterBottomHover()
+                        }
+                    )
+                    .frame(maxWidth: .infinity)
+                    .frame(height: navHeight + 28)
+                }
+                .ignoresSafeArea(edges: .bottom)
             }
             
             // Right sidebar
@@ -1729,11 +2024,6 @@ struct ContentView: View {
                 timeRemaining -= 1
             } else if timeRemaining == 0 {
                 timerIsRunning = false
-                if !isHoveringBottomNav {
-                    withAnimation(.easeOut(duration: 1.0)) {
-                        bottomNavOpacity = 1.0
-                    }
-                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { _ in
@@ -1768,11 +2058,13 @@ struct ContentView: View {
         
         do {
             let content = try String(contentsOf: fileURL, encoding: .utf8)
-            let preview = content
-                .replacingOccurrences(of: "\n", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let preview = stripMarkdownForPreview(
+                content
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            )
             let truncated = preview.isEmpty ? "" : (preview.count > 30 ? String(preview.prefix(30)) + "..." : preview)
-            
+
             // Find and update the entry in the entries array
             if let index = entries.firstIndex(where: { $0.id == entry.id }) {
                 entries[index].previewText = truncated
@@ -2122,96 +2414,59 @@ struct ContentView: View {
     }
     
     private func createPDFFromText(text: String) -> Data? {
-        // Letter size page dimensions
-        let pageWidth: CGFloat = 612.0  // 8.5 x 72
-        let pageHeight: CGFloat = 792.0 // 11 x 72
-        let margin: CGFloat = 72.0      // 1-inch margins
-        
-        // Calculate content area
+        let pageWidth: CGFloat = 612.0
+        let pageHeight: CGFloat = 792.0
+        let margin: CGFloat = 72.0
+
         let contentRect = CGRect(
             x: margin,
             y: margin,
             width: pageWidth - (margin * 2),
             height: pageHeight - (margin * 2)
         )
-        
-        // Create PDF data container
+
         let pdfData = NSMutableData()
-        
-        // Configure text formatting attributes
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = lineHeight
-        
+
+        // Use MarkdownTextStorage to produce a clean attributed string with formatting
+        let storage = MarkdownTextStorage()
         let font = NSFont(name: selectedFont, size: fontSize) ?? .systemFont(ofSize: fontSize)
-        let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1.0),
-            .paragraphStyle: paragraphStyle
-        ]
-        
-        // Trim the initial newlines before creating the PDF
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        // Create the attributed string with formatting
-        let attributedString = NSAttributedString(string: trimmedText, attributes: textAttributes)
-        
-        // Create a Core Text framesetter for text layout
+        storage.styles = MarkdownStyles(
+            baseFont: font,
+            baseFontSize: fontSize,
+            isDark: false
+        )
+        let attributedString = storage.createPDFAttributedString(from: text)
+
         let framesetter = CTFramesetterCreateWithAttributedString(attributedString)
-        
-        // Create a PDF context with the data consumer
+
         guard let pdfContext = CGContext(consumer: CGDataConsumer(data: pdfData as CFMutableData)!, mediaBox: nil, nil) else {
-            print("Failed to create PDF context")
             return nil
         }
-        
-        // Track position within text
+
         var currentRange = CFRange(location: 0, length: 0)
         var pageIndex = 0
-        
-        // Create a path for the text frame
+
         let framePath = CGMutablePath()
         framePath.addRect(contentRect)
-        
-        // Continue creating pages until all text is processed
+
         while currentRange.location < attributedString.length {
-            // Begin a new PDF page
             pdfContext.beginPage(mediaBox: nil)
-            
-            // Fill the page with white background
             pdfContext.setFillColor(NSColor.white.cgColor)
             pdfContext.fill(CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight))
-            
-            // Create a frame for this page's text
-            let frame = CTFramesetterCreateFrame(
-                framesetter, 
-                currentRange, 
-                framePath, 
-                nil
-            )
-            
-            // Draw the text frame
+
+            let frame = CTFramesetterCreateFrame(framesetter, currentRange, framePath, nil)
             CTFrameDraw(frame, pdfContext)
-            
-            // Get the range of text that was actually displayed in this frame
+
             let visibleRange = CTFrameGetVisibleStringRange(frame)
-            
-            // Move to the next block of text for the next page
             currentRange.location += visibleRange.length
-            
-            // Finish the page
+
             pdfContext.endPage()
             pageIndex += 1
-            
-            // Safety check - don't allow infinite loops
-            if pageIndex > 1000 {
-                print("Safety limit reached - stopping PDF generation")
-                break
-            }
+
+            if pageIndex > 1000 { break }
         }
-        
-        // Finalize the PDF document
+
         pdfContext.closePDF()
-        
         return pdfData as Data
     }
 }
@@ -2221,35 +2476,60 @@ func getLineHeight(font: NSFont) -> CGFloat {
     return font.ascender - font.descender + font.leading
 }
 
-// Add helper extension to find NSTextView
-extension NSView {
-    func findTextView() -> NSView? {
-        if self is NSTextView {
-            return self
-        }
-        for subview in subviews {
-            if let textView = subview.findTextView() {
-                return textView
+private struct BottomHoverRevealTrackingView: NSViewRepresentable {
+    var onMouseEntered: () -> Void
+    var onMouseExited: () -> Void
+
+    func makeNSView(context: Context) -> BottomHoverRevealTrackingNSView {
+        let view = BottomHoverRevealTrackingNSView()
+        view.onMouseEntered = onMouseEntered
+        view.onMouseExited = onMouseExited
+        return view
+    }
+
+    func updateNSView(_ nsView: BottomHoverRevealTrackingNSView, context: Context) {
+        nsView.onMouseEntered = onMouseEntered
+        nsView.onMouseExited = onMouseExited
+    }
+
+    final class BottomHoverRevealTrackingNSView: NSView {
+        var onMouseEntered: (() -> Void)?
+        var onMouseExited: (() -> Void)?
+        private var mouseTrackingArea: NSTrackingArea?
+
+        override func updateTrackingAreas() {
+            if let mouseTrackingArea {
+                removeTrackingArea(mouseTrackingArea)
             }
+
+            let trackingArea = NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(trackingArea)
+            mouseTrackingArea = trackingArea
+
+            super.updateTrackingAreas()
         }
-        return nil
+
+        override func mouseEntered(with event: NSEvent) {
+            onMouseEntered?()
+            super.mouseEntered(with: event)
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            onMouseExited?()
+            super.mouseExited(with: event)
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
     }
 }
 
-// Add helper extension for finding subviews of a specific type
-extension NSView {
-    func findSubview<T: NSView>(ofType type: T.Type) -> T? {
-        if let typedSelf = self as? T {
-            return typedSelf
-        }
-        for subview in subviews {
-            if let found = subview.findSubview(ofType: type) {
-                return found
-            }
-        }
-        return nil
-    }
-}
 
 #Preview {
     ContentView()
