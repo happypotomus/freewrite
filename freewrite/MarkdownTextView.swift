@@ -208,8 +208,11 @@ struct MarkdownTextView: NSViewRepresentable {
            !insertion.isEmpty,
            coordinator.consumedPendingInsertion != insertion {
             coordinator.consumedPendingInsertion = insertion
-            textView.insertText(insertion, replacementRange: textView.selectedRange())
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak textView, weak coordinator] in
+                guard let textView, coordinator?.consumedPendingInsertion == insertion else {
+                    return
+                }
+                textView.insertText(insertion, replacementRange: textView.selectedRange())
                 if pendingInsertion == insertion {
                     pendingInsertion = nil
                 }
