@@ -36,8 +36,26 @@ class MarkdownNSTextView: NSTextView {
 }
 
 final class InlinePhotoImageView: NSImageView {
+    var onClick: (() -> Void)?
+
     override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
+        self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+}
+
+final class InlineImageAlignmentButton: NSButton {
+    var onPress: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onPress?()
     }
 }
 
@@ -244,12 +262,14 @@ struct MarkdownTextView: NSViewRepresentable {
         var backspaceDisabled = false
         var consumedPendingInsertion: String?
         private let editingEngine = MarkdownEditingEngine()
-        private var imageViews: [NSImageView] = []
+        private var imageViews: [InlinePhotoImageView] = []
+        private var imageAlignmentToolbar: NSView?
+        private var selectedImageRange: NSRange?
         private var slashLocation: Int?
         private var isSlashMenuActive = false
         private var slashSelectedIndex: Int = 0
         private var slashFilterText: String = ""
-        private static let imageRegex = try! NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(([^)]+)\\)", options: [])
+        private static let imageRegex = MarkdownTextStorage.imageRegex
 
         init(_ parent: MarkdownTextView) {
             self.parent = parent
@@ -305,6 +325,12 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             updateTypingAttributes()
+            guard let textView else { return }
+            if let selectedImageRange,
+               !NSEqualRanges(selectedImageRange, textView.selectedRange()) {
+                self.selectedImageRange = nil
+                scheduleImageOverlayUpdate()
+            }
         }
 
         private func updateTypingAttributes() {
@@ -487,6 +513,8 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         private func updateImageOverlays() {
+            imageAlignmentToolbar?.removeFromSuperview()
+            imageAlignmentToolbar = nil
             imageViews.forEach { $0.removeFromSuperview() }
             imageViews.removeAll()
 
@@ -508,6 +536,9 @@ struct MarkdownTextView: NSViewRepresentable {
                       let image = NSImage(contentsOf: url) else {
                     continue
                 }
+                let alignment = InlineImageAlignment.value(
+                    from: match.range(at: 3).location == NSNotFound ? nil : nsText.substring(with: match.range(at: 3))
+                )
 
                 let characterRange = NSRange(location: match.range.location, length: 1)
                 let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
@@ -518,12 +549,21 @@ struct MarkdownTextView: NSViewRepresentable {
                 let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
                 let displaySize = scaledImageSize(for: image, maxWidth: textContainer.containerSize.width)
                 let containerOrigin = textView.textContainerOrigin
+                let imageX = alignedImageX(
+                    alignment: alignment,
+                    displayWidth: displaySize.width,
+                    lineRect: lineRect,
+                    containerOrigin: containerOrigin,
+                    containerWidth: textContainer.containerSize.width
+                )
                 let frame = NSRect(
-                    x: containerOrigin.x + lineRect.minX,
+                    x: imageX,
                     y: containerOrigin.y + lineRect.minY + max(0, (lineRect.height - displaySize.height) / 2),
                     width: displaySize.width,
                     height: displaySize.height
                 )
+                let imageRange = match.range
+                let isSelected = selectedImageRange.map { NSEqualRanges($0, imageRange) } ?? false
 
                 let imageView = InlinePhotoImageView(frame: frame)
                 imageView.image = image
@@ -531,12 +571,146 @@ struct MarkdownTextView: NSViewRepresentable {
                 imageView.wantsLayer = true
                 imageView.layer?.cornerRadius = 6
                 imageView.layer?.masksToBounds = true
-                imageView.layer?.borderWidth = 0.5
-                imageView.layer?.borderColor = NSColor.separatorColor.cgColor
+                imageView.layer?.borderWidth = isSelected ? 2 : 0.5
+                imageView.layer?.borderColor = (isSelected ? NSColor.controlAccentColor : NSColor.separatorColor).cgColor
                 imageView.isEditable = false
+                imageView.onClick = { [weak self, weak textView] in
+                    guard let textView else { return }
+                    self?.selectImage(range: imageRange, in: textView)
+                }
                 textView.addSubview(imageView)
                 imageViews.append(imageView)
+
+                if isSelected {
+                    addAlignmentToolbar(
+                        for: frame,
+                        imageRange: imageRange,
+                        currentAlignment: alignment,
+                        in: textView,
+                        containerOrigin: containerOrigin,
+                        containerWidth: textContainer.containerSize.width
+                    )
+                }
             }
+        }
+
+        private func alignedImageX(
+            alignment: InlineImageAlignment,
+            displayWidth: CGFloat,
+            lineRect: NSRect,
+            containerOrigin: NSPoint,
+            containerWidth: CGFloat
+        ) -> CGFloat {
+            let leftX = containerOrigin.x + lineRect.minX
+            let availableWidth = max(displayWidth, containerWidth)
+
+            switch alignment {
+            case .left:
+                return leftX
+            case .center:
+                return containerOrigin.x + lineRect.minX + max(0, (availableWidth - displayWidth) / 2)
+            case .right:
+                return containerOrigin.x + lineRect.minX + max(0, availableWidth - displayWidth)
+            }
+        }
+
+        private func selectImage(range: NSRange, in textView: NSTextView) {
+            selectedImageRange = range
+            textView.setSelectedRange(range)
+            scheduleImageOverlayUpdate()
+        }
+
+        private func addAlignmentToolbar(
+            for imageFrame: NSRect,
+            imageRange: NSRange,
+            currentAlignment: InlineImageAlignment,
+            in textView: NSTextView,
+            containerOrigin: NSPoint,
+            containerWidth: CGFloat
+        ) {
+            let toolbarHeight: CGFloat = 30
+            let toolbarWidth: CGFloat = 104
+            let minX = containerOrigin.x
+            let maxX = max(minX, containerOrigin.x + containerWidth - toolbarWidth)
+            let proposedX = imageFrame.midX - (toolbarWidth / 2)
+            let x = min(max(proposedX, minX), maxX)
+            let y = max(containerOrigin.y, imageFrame.minY - toolbarHeight - 6)
+
+            let toolbar = NSVisualEffectView(frame: NSRect(x: x, y: y, width: toolbarWidth, height: toolbarHeight))
+            toolbar.material = .popover
+            toolbar.blendingMode = .withinWindow
+            toolbar.state = .active
+            toolbar.wantsLayer = true
+            toolbar.layer?.cornerRadius = 7
+            toolbar.layer?.masksToBounds = true
+
+            let stack = NSStackView(frame: toolbar.bounds.insetBy(dx: 4, dy: 3))
+            stack.orientation = .horizontal
+            stack.alignment = .centerY
+            stack.distribution = .fillEqually
+            stack.spacing = 4
+            stack.autoresizingMask = [.width, .height]
+
+            for alignment in InlineImageAlignment.allCases {
+                let button = alignmentButton(for: alignment, selected: alignment == currentAlignment)
+                button.onPress = { [weak self, weak textView] in
+                    guard let textView else { return }
+                    self?.applyImageAlignment(alignment, to: imageRange, in: textView)
+                }
+                stack.addArrangedSubview(button)
+            }
+
+            toolbar.addSubview(stack)
+            textView.addSubview(toolbar)
+            imageAlignmentToolbar = toolbar
+        }
+
+        private func alignmentButton(for alignment: InlineImageAlignment, selected: Bool) -> InlineImageAlignmentButton {
+            let imageName: String
+            let tooltip: String
+            switch alignment {
+            case .left:
+                imageName = "text.alignleft"
+                tooltip = "Align left"
+            case .center:
+                imageName = "text.aligncenter"
+                tooltip = "Align center"
+            case .right:
+                imageName = "text.alignright"
+                tooltip = "Align right"
+            }
+
+            let button = InlineImageAlignmentButton(
+                image: NSImage(systemSymbolName: imageName, accessibilityDescription: tooltip) ?? NSImage(),
+                target: nil,
+                action: nil
+            )
+            button.imageScaling = .scaleProportionallyDown
+            button.bezelStyle = selected ? .rounded : .texturedRounded
+            button.isBordered = selected
+            button.toolTip = tooltip
+            return button
+        }
+
+        private func applyImageAlignment(_ alignment: InlineImageAlignment, to imageRange: NSRange, in textView: NSTextView) {
+            let nsText = textView.string as NSString
+            guard imageRange.location != NSNotFound,
+                  imageRange.upperBound <= nsText.length,
+                  let match = Self.imageRegex.firstMatch(in: textView.string, range: imageRange) else {
+                selectedImageRange = nil
+                scheduleImageOverlayUpdate()
+                return
+            }
+
+            let altText = nsText.substring(with: match.range(at: 1))
+            let path = nsText.substring(with: match.range(at: 2))
+            let replacement = "![\(altText)](\(path)){align=\(alignment.rawValue)}"
+            textView.insertText(replacement, replacementRange: match.range)
+
+            let updatedRange = NSRange(location: match.range.location, length: (replacement as NSString).length)
+            selectedImageRange = updatedRange
+            textView.setSelectedRange(updatedRange)
+            scheduleImageOverlayUpdate()
         }
 
         private func resolveImageURL(_ rawPath: String) -> URL? {

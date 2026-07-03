@@ -4,6 +4,19 @@ extension NSAttributedString.Key {
     static let markdownHiddenSyntax = NSAttributedString.Key("freewrite.markdownHiddenSyntax")
 }
 
+enum InlineImageAlignment: String, CaseIterable {
+    case left
+    case center
+    case right
+
+    static func value(from rawValue: String?) -> InlineImageAlignment {
+        guard let rawValue, let alignment = InlineImageAlignment(rawValue: rawValue) else {
+            return .left
+        }
+        return alignment
+    }
+}
+
 struct MarkdownStyles {
     let baseFont: NSFont
     let baseFontSize: CGFloat
@@ -111,7 +124,10 @@ class MarkdownTextStorage: NSTextStorage {
     private static let numberedRegex = try! NSRegularExpression(pattern: "^(\\s*\\d+\\.)\\s+(.*)$", options: .anchorsMatchLines)
     private static let quoteRegex = try! NSRegularExpression(pattern: "^(>)\\s+(.+)$", options: .anchorsMatchLines)
     private static let dividerRegex = try! NSRegularExpression(pattern: "^\\s{0,3}(-{3,}|\\*{3,}|_{3,})\\s*$", options: .anchorsMatchLines)
-    private static let imageRegex = try! NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(([^)]+)\\)", options: [])
+    static let imageRegex = try! NSRegularExpression(
+        pattern: "!\\[([^\\]]*)\\]\\(([^)]+)\\)(?:\\{align=(left|center|right)\\})?",
+        options: []
+    )
 
     override var string: String { backingStore.string }
 
@@ -285,9 +301,12 @@ class MarkdownTextStorage: NSTextStorage {
             }
 
             let displaySize = scaledInlineImageSize(for: image)
+            let alignment = InlineImageAlignment.value(
+                from: match.range(at: 3).location == NSNotFound ? nil : text.substring(with: match.range(at: 3))
+            )
             let globalRange = NSRange(location: match.range.location + offset, length: match.range.length)
             backingStore.addAttributes([
-                .paragraphStyle: imageParagraphStyle(for: displaySize)
+                .paragraphStyle: imageParagraphStyle(for: displaySize, alignment: alignment)
             ], range: globalRange)
             backingStore.addAttributes(styles.imageAnchorAttributes, range: NSRange(location: globalRange.location, length: 1))
             if globalRange.length > 1 {
@@ -297,10 +316,18 @@ class MarkdownTextStorage: NSTextStorage {
         }
     }
 
-    private func imageParagraphStyle(for imageSize: NSSize) -> NSMutableParagraphStyle {
+    private func imageParagraphStyle(for imageSize: NSSize, alignment: InlineImageAlignment) -> NSMutableParagraphStyle {
         let style = styles.defaultParagraphStyle.mutableCopy() as! NSMutableParagraphStyle
         style.minimumLineHeight = imageSize.height + 20
         style.maximumLineHeight = imageSize.height + 20
+        switch alignment {
+        case .left:
+            style.alignment = .left
+        case .center:
+            style.alignment = .center
+        case .right:
+            style.alignment = .right
+        }
         style.paragraphSpacingBefore = 10
         style.paragraphSpacing = 10
         return style

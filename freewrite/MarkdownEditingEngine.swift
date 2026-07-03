@@ -19,7 +19,7 @@ final class MarkdownEditingEngine {
         }
     }
 
-    private static let imageRegex = try! NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(([^)]+)\\)", options: [])
+    private static let imageRegex = MarkdownTextStorage.imageRegex
     private static let boldSpanRegex = try! NSRegularExpression(pattern: "\\*\\*.*?\\*\\*", options: [.dotMatchesLineSeparators])
     private static let bulletLineRegex = try! NSRegularExpression(pattern: "^(\\s*)([-*•])\\s+((?:\\[[ xX]\\]\\s+)?)(.*)$", options: [])
     private static let numberedLineRegex = try! NSRegularExpression(pattern: "^(\\s*)(\\d+)\\.\\s+(.*)$", options: [])

@@ -483,6 +483,13 @@ struct ContentView: View {
         let sourceExtension = sourceURL.pathExtension.isEmpty ? "png" : sourceURL.pathExtension
         let destinationURL = directory.appendingPathComponent("\(UUID().uuidString).\(sourceExtension)")
 
+        let didStartAccessing = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
         try fileManager.copyItem(at: sourceURL, to: destinationURL)
         return relativeImagePath(for: destinationURL, entry: entry)
     }
@@ -537,7 +544,7 @@ struct ContentView: View {
     }
 
     private func choosePhotoForSelectedEntry() {
-        guard selectedTextEntry() != nil else {
+        guard let entry = selectedTextEntry() else {
             return
         }
 
@@ -548,7 +555,7 @@ struct ContentView: View {
         panel.canChooseDirectories = false
 
         panel.begin { response in
-            guard response == .OK, let entry = selectedTextEntry() else {
+            guard response == .OK else {
                 return
             }
 
@@ -565,7 +572,9 @@ struct ContentView: View {
                 return
             }
 
-            pendingMarkdownInsertion = markdownForImagePaths(importedPaths)
+            DispatchQueue.main.async {
+                pendingMarkdownInsertion = markdownForImagePaths(importedPaths)
+            }
         }
     }
 
@@ -605,7 +614,11 @@ struct ContentView: View {
         // Strip italic markers
         result = result.replacingOccurrences(of: "(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)", with: "$1", options: .regularExpression)
         // Replace inline image markdown with a readable preview token
-        result = result.replacingOccurrences(of: "!\\[[^\\]]*\\]\\([^)]+\\)", with: "Photo", options: .regularExpression)
+        result = result.replacingOccurrences(
+            of: "!\\[[^\\]]*\\]\\([^)]+\\)(?:\\{align=(?:left|center|right)\\})?",
+            with: "Photo",
+            options: .regularExpression
+        )
         // Strip blockquote markers
         result = result.replacingOccurrences(of: "^>\\s+", with: "", options: .regularExpression)
         return result.trimmingCharacters(in: .whitespaces)
